@@ -12,8 +12,11 @@ class LLM:
         else:
             self.llm = Llama.from_pretrained(
                 repo_id="Qwen/Qwen2.5-3B-Instruct-GGUF",
+                # repo_id="Qwen/Qwen3-14B-GGUF",
                 filename="qwen2.5-3b-instruct-q4_k_m.gguf",
-                n_ctx=5_000,
+                # filename="Qwen3-14B-Q8_0.gguf",
+                # n_ctx=5_000,
+                n_ctx=16384,
                 n_threads=4,
                 verbose=False,
             )

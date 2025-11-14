@@ -7,7 +7,8 @@ def rerank_paper(candidate:list[ArxivPaper],corpus:list[dict],model:str='avsolat
     encoder = SentenceTransformer(model)
     #sort corpus by date, from newest to oldest
     corpus = sorted(corpus,key=lambda x: datetime.strptime(x['data']['dateAdded'], '%Y-%m-%dT%H:%M:%SZ'),reverse=True)
-    time_decay_weight = 1 / (1 + np.log10(np.arange(len(corpus)) + 1))
+    # time_decay_weight = 1 / (1 + np.log10(np.arange(len(corpus)) + 1))
+    time_decay_weight = 1 / (1 + np.log10(np.arange(len(corpus)) + 1)/2)
     time_decay_weight = time_decay_weight / time_decay_weight.sum()
     corpus_feature = encoder.encode([paper['data']['abstractNote'] for paper in corpus])
     candidate_feature = encoder.encode([paper.summary for paper in candidate])
