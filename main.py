@@ -59,22 +59,49 @@ def filter_corpus(corpus:list[dict], pattern:str) -> list[dict]:
     os.remove(filename)
     return new_corpus
 
-
-def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
-    client = arxiv.Client(num_retries=10,delay_seconds=10)
+def get_arxiv_paper_ids(query:str) -> list[str]:
+    if query == '':
+        raise Exception("ARXIV_QUERY is empty.")
     feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
     if 'Feed error for query' in feed.feed.title:
         raise Exception(f"Invalid ARXIV_QUERY: {query}.")
+    paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in feed.entries if i.arxiv_announce_type == 'new']
+    return paper_ids
+
+def retrive_arxiv_papers_by_ids(paper_ids:list[str], client:arxiv.Client, title:str) -> list[ArxivPaper]:
+    papers = []
+    bar = tqdm(total=len(paper_ids),desc="Retrieving Arxiv papers for "+title)
+    for i in range(0,len(paper_ids),10):
+        search = arxiv.Search(id_list=paper_ids[i:i+10])
+        batch = [ArxivPaper(p) for p in client.results(search)]
+        bar.update(len(batch))
+        papers.extend(batch)
+    bar.close()
+    return papers
+
+def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
+    client = arxiv.Client(num_retries=10,delay_seconds=10)
+    query_splited = query.split('+')
+    query_astroCO = 'astro-ph.CO' if 'astro-ph.CO' in query_splited else ''
+    query_astroOthers = [category for category in query_splited if category.startswith('astro-ph.') and category != 'astro-ph.CO']
+    query_others = [category for category in query_splited if not category.startswith('astro-ph.')]
+
+    query_astroOthers = '+'.join(query_astroOthers)
+    query_others = '+'.join(query_others)
+
     if not debug:
-        papers = []
-        all_paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in feed.entries if i.arxiv_announce_type == 'new']
-        bar = tqdm(total=len(all_paper_ids),desc="Retrieving Arxiv papers")
-        for i in range(0,len(all_paper_ids),20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i+20])
-            batch = [ArxivPaper(p) for p in client.results(search)]
-            bar.update(len(batch))
-            papers.extend(batch)
-        bar.close()
+        all_paper_ids_astroCO = get_arxiv_paper_ids(query_astroCO)
+        all_paper_ids_astroOthers = get_arxiv_paper_ids(query_astroOthers)
+        all_paper_ids_others = get_arxiv_paper_ids(query_others)
+        
+        all_paper_ids_astroOthers = [pid for pid in all_paper_ids_astroOthers if pid not in all_paper_ids_astroCO]
+        all_paper_ids_others = [pid for pid in all_paper_ids_others if pid not in all_paper_ids_astroCO and pid not in all_paper_ids_astroOthers]
+
+        papers_astroCO = retrive_arxiv_papers_by_ids(all_paper_ids_astroCO, client, "astro-ph.CO")
+        papers_astroOthers = retrive_arxiv_papers_by_ids(all_paper_ids_astroOthers, client, "astro-ph.Other")
+        papers_others = retrive_arxiv_papers_by_ids(all_paper_ids_others, client, "other categorys")
+
+        return papers_astroCO, papers_astroOthers, papers_others
 
     else:
         logger.debug("Retrieve 5 arxiv papers regardless of the date.")
@@ -84,9 +111,7 @@ def get_arxiv_paper(query:str, debug:bool=False) -> list[ArxivPaper]:
             papers.append(ArxivPaper(i))
             if len(papers) == 5:
                 break
-
-    return papers
-
+        return papers
 
 
 parser = argparse.ArgumentParser(description='Recommender system for academic papers')
@@ -176,16 +201,21 @@ if __name__ == '__main__':
         corpus = filter_corpus(corpus, args.zotero_ignore)
         logger.info(f"Remaining {len(corpus)} papers after filtering.")
     logger.info("Retrieving Arxiv papers...")
-    papers = get_arxiv_paper(args.arxiv_query, args.debug)
-    if len(papers) == 0:
+    paper_lists = get_arxiv_paper(args.arxiv_query, args.debug)
+    if len(paper_lists[0]) == 0 and len(paper_lists[1]) == 0 and len(paper_lists[2]) == 0:
         logger.info("No new papers found. Yesterday maybe a holiday and no one submit their work :). If this is not the case, please check the ARXIV_QUERY.")
         if not args.send_empty:
           exit(0)
     else:
         logger.info("Reranking papers...")
-        papers = rerank_paper(papers, corpus)
+        papers_astroCO = rerank_paper(paper_lists[0], corpus)
+        papers_astroOthers = rerank_paper(paper_lists[1], corpus)
+        papers_others = rerank_paper(paper_lists[2], corpus)
+
         if args.max_paper_num != -1:
-            papers = papers[:args.max_paper_num]
+            papers_astroCO = papers_astroCO[:args.max_paper_num]
+            papers_astroOthers = papers_astroOthers[:args.max_paper_num]
+            papers_others = papers_others[:args.max_paper_num//2]
         if args.use_llm_api:
             logger.info("Using OpenAI API as global LLM.")
             set_global_llm(api_key=args.openai_api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language)
@@ -193,7 +223,7 @@ if __name__ == '__main__':
             logger.info("Using Local LLM as global LLM.")
             set_global_llm(lang=args.language)
 
-    html = render_email(papers)
+    html = render_email(papers_astroCO + papers_astroOthers + papers_others)
     logger.info("Sending email...")
     send_email(args.sender, args.receiver, args.sender_password, args.smtp_server, args.smtp_port, html)
     logger.success("Email sent successfully! If you don't receive the email, please check the configuration and the junk box.")
