@@ -1,32 +1,30 @@
-from mlx_lm import load, generate as mlx_generate
+from llama_cpp import Llama
 from openai import OpenAI
 from loguru import logger
 from time import sleep
 
 GLOBAL_LLM = None
 
-# Default MLX model from mlx-community (Qwen2.5-7B is a powerful model for local inference)
-DEFAULT_MLX_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
-
-
 class LLM:
-    def __init__(self, api_key: str = None, base_url: str = None, model: str = None, lang: str = "English"):
+    def __init__(self, api_key: str = None, base_url: str = None, model: str = None,lang: str = "English"):
         if api_key:
             self.llm = OpenAI(api_key=api_key, base_url=base_url)
-            self.mlx_model = None
-            self.mlx_tokenizer = None
         else:
-            # Use MLX for local inference on Apple Silicon
-            mlx_model_name = model if model else DEFAULT_MLX_MODEL
-            logger.info(f"Loading MLX model: {mlx_model_name}")
-            self.mlx_model, self.mlx_tokenizer = load(mlx_model_name)
-            self.llm = None
+            self.llm = Llama.from_pretrained(
+                repo_id="Qwen/Qwen2.5-3B-Instruct-GGUF",
+                # repo_id="Qwen/Qwen3-14B-GGUF",
+                filename="qwen2.5-3b-instruct-q4_k_m.gguf",
+                # filename="Qwen3-14B-Q8_0.gguf",
+                # n_ctx=5_000,
+                n_ctx=16384,
+                n_threads=4,
+                verbose=False,
+            )
         self.model = model
         self.lang = lang
 
     def generate(self, messages: list[dict]) -> str:
-        if self.llm is not None:
-            # OpenAI API path
+        if isinstance(self.llm, OpenAI):
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -39,20 +37,8 @@ class LLM:
                     sleep(3)
             return response.choices[0].message.content
         else:
-            # MLX local inference path
-            prompt = self.mlx_tokenizer.apply_chat_template(
-                messages, 
-                add_generation_prompt=True,
-                tokenize=False
-            )
-            response = mlx_generate(
-                self.mlx_model,
-                self.mlx_tokenizer,
-                prompt=prompt,
-                max_tokens=2048,
-                verbose=False
-            )
-            return response
+            response = self.llm.create_chat_completion(messages=messages,temperature=0)
+            return response["choices"][0]["message"]["content"]
 
 def set_global_llm(api_key: str = None, base_url: str = None, model: str = None, lang: str = "English"):
     global GLOBAL_LLM
