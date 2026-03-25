@@ -118,6 +118,48 @@ def get_stars(score:float):
         return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
 
 
+def get_section_header_html(label:str):
+    return f"""
+  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; padding: 16px 0 4px 0;">
+  <tr>
+    <td style="font-size: 22px; font-weight: bold; color: #1a1a2e; border-bottom: 2px solid #1a1a2e; padding-bottom: 6px;">
+      {label}
+    </td>
+  </tr>
+  </table>
+"""
+
+
+def render_email_grouped(groups:list[tuple[str, list[ArxivPaper]]]):
+    all_parts = []
+    has_any_paper = any(len(papers) > 0 for _, papers in groups)
+    if not has_any_paper:
+        return framework.replace('__CONTENT__', get_empty_html())
+    for label, papers in groups:
+        if not papers:
+            continue
+        all_parts.append(get_section_header_html(label))
+        for p in tqdm(papers, desc=f'Rendering {label}'):
+            rate = get_stars(p.score)
+            author_list = [a.name for a in p.authors]
+            num_authors = len(author_list)
+            if num_authors <= 5:
+                authors = ', '.join(author_list)
+            else:
+                authors = ', '.join(author_list[:3] + ['...'] + author_list[-2:])
+            if p.affiliations is not None:
+                affiliations = p.affiliations[:5]
+                affiliations = ', '.join(affiliations)
+                if len(p.affiliations) > 5:
+                    affiliations += ', ...'
+            else:
+                affiliations = 'Unknown Affiliation'
+            all_parts.append(get_block_html(p.title, authors, rate, p.arxiv_id, p.tldr, p.pdf_url, p.code_url, affiliations))
+            time.sleep(10)
+    content = '<br>' + '</br><br>'.join(all_parts) + '</br>'
+    return framework.replace('__CONTENT__', content)
+
+
 def render_email(papers:list[ArxivPaper]):
     parts = []
     if len(papers) == 0 :

@@ -13,6 +13,7 @@ def _get_pdf_url_patch(links) -> str:
 
 arxiv.Result._get_pdf_url = _get_pdf_url_patch
 
+import re
 import argparse
 import os
 import sys
@@ -21,7 +22,7 @@ load_dotenv(override=True)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from pyzotero import zotero
 from recommender import rerank_paper
-from construct_email import render_email, send_email
+from construct_email import render_email, render_email_grouped, send_email
 from tqdm import trange,tqdm
 from loguru import logger
 from gitignore_parser import parse_gitignore
@@ -30,7 +31,7 @@ from paper import ArxivPaper
 from llm import set_global_llm
 import feedparser
 
-def get_zotero_corpus(id:str,key:str) -> list[dict]:
+def get_zotero_corpus(id:str,key:str) -> tuple[list[dict], set[str]]:
     zot = zotero.Zotero(id, 'user', key)
     collections = zot.everything(zot.collections())
     collections = {c['key']:c for c in collections}
@@ -41,10 +42,50 @@ def get_zotero_corpus(id:str,key:str) -> list[dict]:
             return get_collection_path(p) + '/' + collections[col_key]['data']['name']
         else:
             return collections[col_key]['data']['name']
+    all_collection_paths = {get_collection_path(k) for k in collections}
     for c in corpus:
         paths = [get_collection_path(col) for col in c['data']['collections']]
         c['paths'] = paths
-    return corpus
+    return corpus, all_collection_paths
+
+def parse_categories(filepath:str, valid_paths:set[str]) -> list[tuple[str, list[str], int]]:
+    """Parse .categories file. Returns list of (label, [collection_paths], max_num).
+    Raises ValueError if a path does not exist in the Zotero library.
+    """
+    groups = []
+    with open(filepath) as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            if ';' not in line:
+                raise ValueError(f"Line {lineno}: missing ';' separator: {line!r}")
+            lhs, rhs = line.rsplit(';', 1)
+            try:
+                max_num = int(rhs.strip())
+            except ValueError:
+                raise ValueError(f"Line {lineno}: max paper count must be an integer, got {rhs.strip()!r}")
+            paths = re.findall(r'\(([^)]+)\)', lhs)
+            if not paths:
+                raise ValueError(f"Line {lineno}: no collection paths found in parentheses")
+            paths = [p.strip() for p in paths]
+            for path in paths:
+                if path not in valid_paths:
+                    raise ValueError(f"Line {lineno}: collection path {path!r} does not exist in Zotero library")
+            groups.append((lhs.strip(), paths, max_num))
+    return groups
+
+
+def filter_corpus_by_paths(corpus:list[dict], paths:list[str]) -> list[dict]:
+    """Return papers whose collection path starts with any of the given paths."""
+    result = []
+    for paper in corpus:
+        for paper_path in paper['paths']:
+            if any(paper_path == p or paper_path.startswith(p + '/') for p in paths):
+                result.append(paper)
+                break
+    return result
+
 
 def filter_corpus(corpus:list[dict], pattern:str) -> list[dict]:
     _,filename = mkstemp()
@@ -169,7 +210,7 @@ if __name__ == '__main__':
         logger.add(sys.stdout, level="INFO")
 
     logger.info("Retrieving Zotero corpus...")
-    corpus = get_zotero_corpus(args.zotero_id, args.zotero_key)
+    corpus, all_collection_paths = get_zotero_corpus(args.zotero_id, args.zotero_key)
     logger.info(f"Retrieved {len(corpus)} papers from Zotero.")
     if args.zotero_ignore:
         logger.info(f"Ignoring papers in:\n {args.zotero_ignore}...")
@@ -182,10 +223,6 @@ if __name__ == '__main__':
         if not args.send_empty:
           exit(0)
     else:
-        logger.info("Reranking papers...")
-        papers = rerank_paper(papers, corpus)
-        if args.max_paper_num != -1:
-            papers = papers[:args.max_paper_num]
         if args.use_llm_api:
             logger.info("Using OpenAI API as global LLM.")
             set_global_llm(api_key=args.openai_api_key, base_url=args.openai_api_base, model=args.model_name, lang=args.language)
@@ -193,7 +230,34 @@ if __name__ == '__main__':
             logger.info("Using Local LLM as global LLM.")
             set_global_llm(lang=args.language)
 
-    html = render_email(papers)
+    if os.path.exists('.categories'):
+        logger.info("Found .categories file, using grouped recommendations.")
+        category_groups = parse_categories('.categories', all_collection_paths)
+        seen_ids = set()
+        grouped_results = []  # list of (label, [(paper, score)])
+        for label, paths, max_num in category_groups:
+            subset_corpus = filter_corpus_by_paths(corpus, paths)
+            logger.info(f"Category '{label}': {len(subset_corpus)} corpus papers matched.")
+            ranked = rerank_paper(papers, subset_corpus)
+            group_papers = []
+            for p in ranked:
+                if p.arxiv_id not in seen_ids:
+                    group_papers.append((p, p.score))
+                    seen_ids.add(p.arxiv_id)
+                if len(group_papers) >= max_num:
+                    break
+            grouped_results.append((label, group_papers))
+        # Restore per-group scores (later rerank_paper calls overwrite .score in-place)
+        for label, group in grouped_results:
+            for p, score in group:
+                p.score = score
+        html = render_email_grouped([(label, [p for p, _ in group]) for label, group in grouped_results])
+    else:
+        logger.info("Reranking papers...")
+        papers = rerank_paper(papers, corpus)
+        if args.max_paper_num != -1:
+            papers = papers[:args.max_paper_num]
+        html = render_email(papers)
     logger.info("Sending email...")
     send_email(args.sender, args.receiver, args.sender_password, args.smtp_server, args.smtp_port, html)
     logger.success("Email sent successfully! If you don't receive the email, please check the configuration and the junk box.")
