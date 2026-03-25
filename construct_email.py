@@ -104,8 +104,8 @@ def get_block_html(title:str, authors:str, rate:str,arxiv_id:str, abstract:str, 
 def get_stars(score:float):
     full_star = '<span class="full-star">⭐</span>'
     half_star = '<span class="half-star">⭐</span>'
-    low = 6
-    high = 8
+    low = 0
+    high = 10
     if score <= low:
         return ''
     elif score >= high:

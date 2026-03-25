@@ -78,22 +78,31 @@ class ArxivPaper:
     def tex(self) -> dict[str,str]:
         with ExitStack() as stack:
             tmpdirname = stack.enter_context(TemporaryDirectory())
-            # file = self._paper.download_source(dirpath=tmpdirname)
-            try:
-                # 尝试下载源文件
-                file = self._paper.download_source(dirpath=tmpdirname)
-            except HTTPError as e:
-                # 捕获 HTTP 错误
-                if e.code == 404:
-                    # 如果是 404 Not Found，说明源文件不存在，这是正常情况
-                    logger.warning(f"Source for {self.arxiv_id} not found (404). Skipping source analysis.")
-                    return None # 直接返回 None，后续依赖 tex 的代码会安全地处理
-                else:
-                    # 如果是其他 HTTP 错误 (如 503)，这可能是临时性问题，值得记录下来
-                    logger.error(f"HTTP Error {e.code} when downloading source for {self.arxiv_id}: {e.reason}")
-                    raise # 重新抛出异常，因为这可能是个需要关注的严重问题
-            except Exception as e:
-                logger.error(f"Error when downloading source for {self.arxiv_id}: {e}")
+            max_retries = 3
+            file = None
+            for attempt in range(max_retries):
+                try:
+                    file = self._paper.download_source(dirpath=tmpdirname)
+                    break
+                except HTTPError as e:
+                    if e.code == 404:
+                        logger.warning(f"Source for {self.arxiv_id} not found (404). Skipping source analysis.")
+                        return None
+                    elif e.code == 429:
+                        if attempt < max_retries - 1:
+                            wait_time = 30 * (attempt + 1)
+                            logger.warning(f"Rate limited (429) when downloading source for {self.arxiv_id}. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"Rate limited (429) when downloading source for {self.arxiv_id} after {max_retries} attempts. Skipping.")
+                            return None
+                    else:
+                        logger.error(f"HTTP Error {e.code} when downloading source for {self.arxiv_id}: {e.reason}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Error when downloading source for {self.arxiv_id}: {e}")
+                    return None
+            if file is None:
                 return None
             try:
                 tar = stack.enter_context(tarfile.open(file))
